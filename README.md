@@ -1,6 +1,23 @@
 # 🚀 Deterministic Matching Engine
 
-**Jane Street Quantitative Trading Internship Project – Production-Grade Order Matching Engine**
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+![C++](https://img.shields.io/badge/C%2B%2B-17-00599C.svg?logo=c%2B%2B)
+![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)
+![Build System](https://img.shields.io/badge/build-CMake-064F8C?logo=cmake)
+
+![Deterministic](https://img.shields.io/badge/deterministic-100%25-success)
+![Lock Free](https://img.shields.io/badge/lock--free-yes-brightgreen)
+![Event Sourcing](https://img.shields.io/badge/event--sourcing-enabled-blue)
+![Invariants](https://img.shields.io/badge/invariants-6%20verified-orange)
+
+![Throughput](https://img.shields.io/badge/throughput-1M%20ops%2Fs-red)
+![Latency](https://img.shields.io/badge/latency-P99%20%3C%205%C2%B5s-critical)
+
+![Tests](https://img.shields.io/badge/tests-9%20unit%20%2B%205%20property-success)
+![Coverage](https://img.shields.io/badge/coverage-core%20logic-brightgreen)
+
+> **Production-grade order matching engine for Jane Street interview project**  
+> Demonstrating correctness-first design, formal invariants, and event sourcing architecture.
 
 ---
 
