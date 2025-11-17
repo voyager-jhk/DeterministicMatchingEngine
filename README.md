@@ -1,341 +1,341 @@
 # 🚀 Deterministic Matching Engine
 
-**Jane Street 量化交易实习项目 - 生产级订单撮合引擎**
+**Jane Street Quantitative Trading Internship Project – Production-Grade Order Matching Engine**
 
 ---
 
-## 📂 项目结构
+## 📂 Project Structure
 
 ```
 MatchingEngine/
 ├── src/
-│   ├── types.hpp          # 强类型定义
+│   ├── types.hpp          # Strong type definitions
 │   ├── order.hpp          # Order, LimitLevel
-│   ├── events.hpp         # 事件系统
-│   ├── orderbook.hpp      # 核心撮合逻辑
-│   ├── replay.hpp         # 重放引擎
-│   └── main.cpp           # 演示程序
+│   ├── events.hpp         # Event system
+│   ├── orderbook.hpp      # Core matching logic
+│   ├── replay.hpp         # Replay engine
+│   └── main.cpp           # Demo program
 ├── tests/
-│   ├── unit_tests.cpp     # 单元测试
-│   └── property_tests.cpp # 性质测试
+│   ├── unit_tests.cpp     # Unit tests
+│   └── property_tests.cpp # Property-based tests
 ├── benchmarks/
-│   └── perf.cpp           # 性能测试
-├── CMakeLists.txt         # 构建配置
-└── README.md              # 本文档
+│   └── perf.cpp           # Performance benchmark
+├── CMakeLists.txt         # Build configuration
+└── README.md              # This document
 ```
 
 ---
 
-## 🚀 快速开始
+## 🚀 Quick Start
 
-### **1. 编译项目**
+### **1. Build the Project**
 
 ```bash
-# 创建构建目录
+# Create build directory
 mkdir build && cd build
 
-# 配置 (Release 模式)
+# Configure (Release mode)
 cmake -DCMAKE_BUILD_TYPE=Release ..
 
-# 编译 (使用所有 CPU 核心)
+# Compile (use all CPU cores)
 make -j$(nproc)
 
-# 或者 Windows:
+# Or on Windows:
 # cmake -G "Visual Studio 17 2022" ..
 # cmake --build . --config Release
 ```
 
-### **2. 运行演示**
+### **2. Run the Demo**
 
 ```bash
-# 主演示程序
+# Main demo program
 ./matching_engine_demo
 
-# 单元测试
+# Unit tests
 ./matching_engine_unit_tests
 
-# 性质测试 (QuickCheck 风格)
+# Property-based tests (QuickCheck style)
 ./matching_engine_property_tests
 
-# 性能基准测试
+# Performance benchmarks
 ./matching_engine_benchmarks
 ```
 
 ---
 
-## ✨ 核心特性
+## ✨ Core Features
 
-### **1. 编译期类型安全**
+### **1. Compile-Time Type Safety**
 
 ```cpp
 using Price = StrongType<double, PriceTag>;
 using Quantity = StrongType<uint64_t, QuantityTag>;
-// 编译器防止参数混淆
+// Prevent argument mix-ups at compile time
 ```
 
-### **2. 事件溯源架构**
+### **2. Event Sourcing Architecture**
 
 ```cpp
-// 所有状态变化都通过事件记录
+// All state changes are recorded through events
 OrderBook book;
 book.process_new_order(...);
-// 自动生成 NewOrderEvent 和 TradeEvent
+// Automatically generates NewOrderEvent and TradeEvent
 ```
 
-### **3. 形式化不变量**
+### **3. Formal Invariants**
 
 ```cpp
-// 6 个关键不变量在每次操作后验证
+// Six key invariants verified after each operation
 assert(book.check_invariants());
 // 1. best_bid < best_ask
 // 2. total_volume = Σ remaining_qty
 // 3. remaining_qty ≤ original_qty
-// ... (详见代码)
+// ... (see code)
 ```
 
-### **4. 完整重放能力**
+### **4. Full Replay Capability**
 
 ```cpp
-// 从事件日志精确重建状态
+// Reconstruct state precisely from event log
 OrderBook replayed = ReplayEngine::replay_from_log(events);
 ```
 
 ### **5. Property-Based Testing**
 
 ```cpp
-// 随机测试 1000 次，验证所有不变量
+// Random testing for 1000 trials verifying all invariants
 for 1000 trials:
-    生成随机订单序列
-    验证订单簿永不交叉
-    验证重放产生相同结果
+    generate random order sequences
+    ensure order book never crosses
+    verify replay produces identical results
 ```
 
 ---
 
-## 🏗️ 架构设计
+## 🏗️ Architecture Design
 
-### **类型层次**
+### **Type Hierarchy**
 
 ```
-StrongType<T, Tag>           # 编译期类型安全
+StrongType<T, Tag>           # Compile-time type safety
     ├── OrderId
     ├── Price
     ├── Quantity
     └── Timestamp
 
-Order                        # 不可变订单
+Order                        # Immutable order
     ├── id
     ├── timestamp
     ├── side (BUY/SELL)
     ├── price
     └── remaining_qty
 
-LimitLevel                   # FIFO 价格级别
+LimitLevel                   # FIFO price level
     ├── price
     ├── orders (queue)
     └── total_volume
 
-OrderBook                    # 核心撮合引擎
-    ├── bids (map, 降序)
-    ├── asks (map, 升序)
+OrderBook                    # Core matching engine
+    ├── bids (map, descending)
+    ├── asks (map, ascending)
     ├── order_map
     └── event_log
 ```
 
-### **事件系统**
+### **Event System**
 
 ```
-Event (抽象基类)
-    ├── NewOrderEvent        # 用户输入
-    ├── CancelOrderEvent     # 用户输入
-    └── TradeEvent           # 系统生成
+Event (abstract base class)
+    ├── NewOrderEvent        # User input
+    ├── CancelOrderEvent     # User input
+    └── TradeEvent           # System-generated
 ```
 
 ---
 
-## 🎯 设计决策
+## 🎯 Design Decisions
 
-### **Q: 为什么用 `std::map` 而不是 `std::unordered_map`?**
+### **Q: Why `std::map` instead of `std::unordered_map`?**
 
-**A:** 因为访问最优价格是最频繁的操作 (90%)：
+**A:** Because accessing best price is the most frequent operation (90%):
 
-- `std::map`: best_bid() = O(1) [begin()]
-- `std::unordered_map`: best_bid() = O(N) [遍历所有键]
+- `std::map`: best_bid() = O(1) via begin()
+- `std::unordered_map`: best_bid() = O(N), must scan all keys
 
-### **Q: 为什么用事件溯源?**
+### **Q: Why use event sourcing?**
 
-**A:** 三个关键原因：
+**A:** Three key reasons:
 
-1. **确定性**: 相同输入产生相同输出，便于调试
-2. **可审计**: 完整记录所有操作，满足监管要求
-3. **可测试**: 可以重放任意历史状态
+1. **Determinism**: Same input yields same output, easy to debug
+2. **Auditability**: Full record of all operations, satisfies regulatory needs
+3. **Testability**: Can replay any historical state
 
-### **Q: 如何保证盘口不会交叉?**
+### **Q: How to guarantee the book will never cross?**
 
-**A:** 通过匹配逻辑的设计：
+**A:** Through matching logic:
 
 ```cpp
 if (buy_order.price >= best_ask) {
-    // 立即匹配，消耗对手方价格
+    // Immediate match consuming ask side
     match_with_asks(buy_order);
 }
-// 如果有剩余且 buy_order.price < best_ask，加入 bids
-// 因此永远满足 best_bid < best_ask
+// If leftover and buy_order.price < best_ask, insert into bids
+// Thus always maintain best_bid < best_ask
 ```
 
 ---
 
-## 🧪 测试策略
+## 🧪 Testing Strategy
 
-### **单元测试 (9 个场景)**
+### **Unit Tests (9 Scenarios)**
 
-1. ✅ Simple Fill - 完全匹配
-2. ✅ Partial Fill - 部分成交
-3. ✅ Multi-Level Sweep - 跨价格扫单
-4. ✅ Cancel Order - 订单取消
-5. ✅ Price-Time Priority - FIFO 验证
-6. ✅ Invariants - 不变量检查
-7. ✅ Replay Determinism - 重放一致性
-8. ✅ Empty Book - 空订单簿边界
-9. ✅ Crossed Prevention - 防交叉盘口
+1. ✅ Simple Fill – Full match
+2. ✅ Partial Fill – Partial execution
+3. ✅ Multi-Level Sweep – Sweeping through multiple price levels
+4. ✅ Cancel Order
+5. ✅ Price-Time Priority – FIFO verification
+6. ✅ Invariants – Invariant checking
+7. ✅ Replay Determinism – Replay consistency
+8. ✅ Empty Book – Boundary conditions
+9. ✅ Crossed Prevention – Ensure non-crossing book
 
-### **性质测试 (5 个属性)**
+### **Property-Based Tests (5 Properties)**
 
-1. 🔬 Book Never Crosses - 1000 次随机测试
-2. 🔬 Replay Idempotence - 100 次重放验证
-3. 🔬 Volume Conservation - 成交量守恒
-4. 🔬 FIFO Order - 严格时间优先
-5. 🔬 Price Reasonableness - 价差合理性
-
----
-
-## ⚡ 性能数据
-
-### **基准测试结果** (参考值，取决于硬件)
-
-| 指标       | 数值           |
-| ---------- | -------------- |
-| 吞吐量     | ~1M orders/sec |
-| P50 延迟   | <1 μs          |
-| P99 延迟   | <5 μs          |
-| P99.9 延迟 | <50 μs         |
-
-### **压力测试**
-
-- ✅ 100 万订单处理无错误
-- ✅ 所有不变量始终满足
-- ✅ 内存使用线性增长 O(N)
+1. 🔬 Book Never Crosses – 1000 random tests
+2. 🔬 Replay Idempotence – 100 replay verifications
+3. 🔬 Volume Conservation
+4. 🔬 FIFO Order – Strict time priority
+5. 🔬 Price Reasonableness – Spread validity
 
 ---
 
-## 🔍 核心不变量
+## ⚡ Performance Data
 
-### **全局不变量**
+### **Benchmark Results** (Reference values; hardware-dependent)
 
-1. **盘口不交叉**: `best_bid < best_ask` (当双方都存在)
-2. **数量守恒**: `LimitLevel.total_volume = Σ order.remaining_qty`
-3. **订单一致性**: `remaining_qty ≤ original_qty`
-4. **时间单调性**: `event[i].timestamp ≤ event[i+1].timestamp`
+| Metric        | Value          |
+| ------------- | -------------- |
+| Throughput    | ~1M orders/sec |
+| P50 Latency   | <1 μs          |
+| P99 Latency   | <5 μs          |
+| P99.9 Latency | <50 μs         |
 
-### **局部不变量**
+### **Stress Testing**
 
-5. **FIFO 顺序**: 每个价格级别内严格按时间排序
-6. **价格单调性**: Bids 降序，Asks 升序
-
----
-
-## 📚 面试准备
-
-### **你应该能讨论的问题**
-
-1. **设计权衡**: 为什么选择这种数据结构？
-2. **复杂度分析**: 每个操作的时间/空间复杂度？
-3. **扩展性**: 如何支持多交易对？如何分布式部署？
-4. **极端情况**: 如何处理订单簿为空？自成交？
-5. **优化方向**: 如何从 1M ops/s 优化到 10M ops/s？
-
-### **关键数字 (要记住)**
-
-- 吞吐量: ~1M orders/sec
-- 延迟: P99 < 5μs
-- 不变量数量: 6 个
-- 测试场景: 9 个单元 + 5 个性质
-- 代码模块: 5 个头文件 + 4 个可执行文件
+- ✅ 1,000,000 orders processed without error
+- ✅ All invariants always preserved
+- ✅ Memory usage grows linearly O(N)
 
 ---
 
-## 🎓 扩展方向 (可选实现)
+## 🔍 Key Invariants
 
-### **Level 1: 基础扩展**
+### **Global Invariants**
 
-- [ ] Stop-Loss 订单
-- [ ] Iceberg 订单 (隐藏数量)
-- [ ] Market 订单优化
-- [ ] Modify 订单 (原地修改)
+1. **Book not crossed**: `best_bid < best_ask` (when both exist)
+2. **Volume conservation**: `LimitLevel.total_volume = Σ order.remaining_qty`
+3. **Order consistency**: `remaining_qty ≤ original_qty`
+4. **Timestamp monotonicity**: `event[i].timestamp ≤ event[i+1].timestamp`
 
-### **Level 2: 生产特性**
+### **Local Invariants**
 
-- [ ] FIX 协议接口
-- [ ] 持久化 (RocksDB)
-- [ ] 快照与恢复
-- [ ] 风控检查 (credit check)
-
-### **Level 3: 分布式系统**
-
-- [ ] Raft 共识协议
-- [ ] 跨地域复制
-- [ ] 负载均衡
-- [ ] 灰度发布
+1. **FIFO**: Strict arrival order within each price level
+2. **Price monotonicity**: Bids descending, Asks ascending
 
 ---
 
-## 📖 相关文档
+## 📚 Interview Preparation
 
-- **面试问答**: `docs/interview_qa.md` - 12 个深度问题
-- **架构设计**: 详见本 README
-- **API 文档**: 代码中的注释
+### **Topics You Should Be Ready to Discuss**
+
+1. **Design trade-offs**: Why choose these data structures?
+2. **Complexity analysis**: Time/space cost of each operation
+3. **Scalability**: Support for multiple trading pairs? Distributed deployment?
+4. **Edge cases**: Empty book? Self-trade?
+5. **Optimization**: Scaling from 1M ops/s to 10M ops/s?
+
+### **Key Numbers (Memorize These)**
+
+- Throughput: ~1M orders/sec
+- Latency: P99 < 5μs
+- Number of invariants: 6
+- Tests: 9 unit + 5 properties
+- Code modules: 5 headers + 4 executables
 
 ---
 
-## 🤝 贡献指南
+## 🎓 Extension Directions (Optional Features)
 
-这是一个教育项目，欢迎：
+### **Level 1: Basic Extensions**
 
-- 报告 bug
-- 提出改进建议
-- 添加测试用例
-- 性能优化
+- [ ] Stop-Loss orders
+- [ ] Iceberg orders (hidden size)
+- [ ] Market order optimization
+- [ ] Modify order (in-place update)
+
+### **Level 2: Production Features**
+
+- [ ] FIX protocol interface
+- [ ] Persistence (RocksDB)
+- [ ] Snapshot & recovery
+- [ ] Risk checks (credit check)
+
+### **Level 3: Distributed Systems**
+
+- [ ] Raft consensus
+- [ ] Cross-region replication
+- [ ] Load balancing
+- [ ] Canary release
+
+---
+
+## 📖 Documentation
+
+- **Interview Q&A**: `docs/interview_qa.md` – 12 deep questions
+- **Architecture Design**: See this README
+- **API Documentation**: In-code comments
+
+---
+
+## 🤝 Contributing
+
+This is an educational project; contributions are welcome:
+
+- Bug reports
+- Improvement suggestions
+- Additional test cases
+- Performance optimizations
 
 ---
 
 ## 📝 License
 
-MIT License - 仅用于教育和面试目的
+MIT License – For educational and interview purposes only
 
 ---
 
-## 🙏 致谢
+## 🙏 Acknowledgements
 
-本项目设计理念受到以下启发：
+This project is inspired by:
 
-- Jane Street 的工程文化
-- Martin Fowler 的事件溯源模式
-- QuickCheck 的性质测试方法
-
----
-
-## 📞 联系方式
-
-如有问题或建议，请提交 Issue 或 Pull Request。
-
-**祝你面试成功！🍀**
+- Jane Street engineering culture
+- Martin Fowler’s event-sourcing pattern
+- QuickCheck-style property testing
 
 ---
 
-## 💡 快速命令参考
+## 📞 Contact
+
+For questions or suggestions, please open an Issue or Pull Request.
+
+**Wish you success in your interview! 🍀**
+
+---
+
+## 💡 Quick Command Reference
 
 ```bash
-# 一键编译和运行所有测试
+# Build and run all tests with one command
 mkdir build && cd build && cmake .. && make -j$(nproc) && \
 ./matching_engine_demo && \
 ./matching_engine_unit_tests && \
@@ -345,6 +345,6 @@ mkdir build && cd build && cmake .. && make -j$(nproc) && \
 
 ---
 
-**最后更新**: 2025
-**版本**: 1.0.0
-**作者**: Jane Street 面试候选人
+**Last Updated**: 2025
+**Version**: 1.0.0
+**Author**: Jane Street Interview Candidate
