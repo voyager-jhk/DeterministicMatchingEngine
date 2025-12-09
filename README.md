@@ -1,9 +1,7 @@
 # Deterministic Matching Engine
 
 ![alt text](https://img.shields.io/badge/License-MIT-yellow.svg)
-
 ![alt text](https://img.shields.io/badge/C%2B%2B-17-00599C.svg?logo=c%2B%2B)
-
 ![alt text](https://img.shields.io/badge/build-CMake-064F8C?logo=cmake)
 
 > **A high-performance, deterministic Limit Order Book (LOB) implementation in C++17.**
