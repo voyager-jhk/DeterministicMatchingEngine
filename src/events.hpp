@@ -96,4 +96,4 @@ struct TradeEvent : Event {
     }
 };
 
-#endif // EVENTS_HPP
+#endif

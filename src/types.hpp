@@ -64,4 +64,4 @@ inline std::string to_string(Side side) {
     return side == Side::BUY ? "BUY" : "SELL";
 }
 
-#endif // TYPES_HPP
+#endif

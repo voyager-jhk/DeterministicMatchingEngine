@@ -262,11 +262,11 @@ private:
     // Remove order from book (simplified - O(N) for clarity)
     void remove_from_book(std::shared_ptr<Order> order) {
         if (order->side == Side::BUY) {
-            remove_from_map(bids_, order); // 调用模板函数处理 bids_
+            remove_from_map(bids_, order);
         } else {
-            remove_from_map(asks_, order); // 调用模板函数处理 asks_
+            remove_from_map(asks_, order);
         }
     }
 };
 
-#endif // ORDERBOOK_HPP
+#endif

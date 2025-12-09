@@ -33,19 +33,17 @@ private:
     }
     
 public:
-    // Property 1: 订单簿永不交叉
+    // Property 1: The Order Book Non-Crossing Principle
     void test_never_crosses() {
         std::cout << "\n🔬 Property Test 1: Book Never Crosses\n";
         
         for (int trial = 0; trial < 1000; ++trial) {
             OrderBook book;
             
-            // 随机生成 100 个订单
             for (uint64_t i = 0; i < 100; ++i) {
                 auto order = generate_random_order(trial * 100 + i);
                 book.process_new_order(order.id, order.side, order.price, order.quantity);
                 
-                // 验证不变量
                 if (!book.check_invariants()) {
                     std::cerr << "FAILED at trial " << trial << ", order " << i << "\n";
                     throw std::runtime_error("Invariant violation detected");
@@ -56,23 +54,20 @@ public:
         std::cout << "  ✓ Passed 1000 trials with 100,000 orders\n";
     }
     
-    // Property 2: 重放产生相同结果
+    // Property 2: Replay Determinism
     void test_replay_idempotence() {
         std::cout << "\n🔬 Property Test 2: Replay Idempotence\n";
         
         for (int trial = 0; trial < 100; ++trial) {
             OrderBook book1;
             
-            // 生成随机订单序列
             for (uint64_t i = 0; i < 50; ++i) {
                 auto order = generate_random_order(trial * 50 + i);
                 book1.process_new_order(order.id, order.side, order.price, order.quantity);
             }
             
-            // 重放
             OrderBook book2 = ReplayEngine::replay_from_log(book1.get_event_log());
             
-            // 验证结果完全一致
             auto bid1 = book1.best_bid();
             auto bid2 = book2.best_bid();
             (void)bid2;
@@ -94,7 +89,7 @@ public:
         std::cout << "  ✓ Passed 100 replay trials\n";
     }
     
-    // Property 3: 成交量守恒
+    // Property 3: Conservation of Execution Volume
     void test_volume_conservation() {
         std::cout << "\n🔬 Property Test 3: Volume Conservation\n";
         
@@ -115,7 +110,6 @@ public:
                 }
             }
             
-            // 计算成交量
             uint64_t traded = 0;
             for (const auto& event : book.get_event_log()) {
                 if (auto trade = std::dynamic_pointer_cast<TradeEvent>(event)) {
@@ -123,28 +117,24 @@ public:
                 }
             }
             
-            // 验证：总量 >= 成交量
             assert(traded <= std::min(total_buy, total_sell));
         }
         
         std::cout << "  ✓ Volume conservation verified in 1000 trials\n";
     }
     
-    // Property 4: FIFO 顺序
+    // Property 4: Priority Ordering (FIFO)
     void test_fifo_order() {
         std::cout << "\n🔬 Property Test 4: FIFO Priority\n";
         
         OrderBook book;
         
-        // 在同一价格添加多个订单
         for (uint64_t i = 0; i < 10; ++i) {
             book.process_new_order(OrderId(i), Side::SELL, Price(100.0), Quantity(10));
         }
         
-        // 大买单扫单
         book.process_new_order(OrderId(100), Side::BUY, Price(100.0), Quantity(100));
         
-        // 验证成交顺序
         std::vector<uint64_t> trade_sequence;
         for (const auto& event : book.get_event_log()) {
             if (auto trade = std::dynamic_pointer_cast<TradeEvent>(event)) {
@@ -152,7 +142,6 @@ public:
             }
         }
         
-        // 应该严格按 0, 1, 2, ..., 9 的顺序成交
         for (size_t i = 0; i < trade_sequence.size(); ++i) {
             assert(trade_sequence[i] == i);
         }
@@ -160,17 +149,15 @@ public:
         std::cout << "  ✓ FIFO order maintained\n";
     }
     
-    // Property 5: 单调性 - 最优价格随时间变化的合理性
+    // Property 5: Best Price Monotonicity
     void test_price_monotonicity() {
         std::cout << "\n🔬 Property Test 5: Price Reasonableness\n";
         
         OrderBook book;
         
-        // 添加初始订单簿
         book.process_new_order(OrderId(1), Side::BUY, Price(99.0), Quantity(100));
         book.process_new_order(OrderId(2), Side::SELL, Price(101.0), Quantity(100));
         
-        // 随机添加订单，验证价差的合理性
         for (int i = 0; i < 100; ++i) {
             auto order = generate_random_order(10 + i);
             book.process_new_order(order.id, order.side, order.price, order.quantity);
@@ -181,7 +168,6 @@ public:
             if (bid.has_value() && ask.has_value()) {
                 double spread = ask->get() - bid->get();
                 (void)spread;
-                // 价差必须非负
                 assert(spread >= 0);
             }
         }
