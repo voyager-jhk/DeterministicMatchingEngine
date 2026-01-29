@@ -2,11 +2,11 @@
 #define ORDER_HPP
 
 #include "types.hpp"
-#include <memory>
-#include <queue>
+#include <vector>
+#include <cstddef>
 
 // ============================================================================
-// ORDER - Immutable order representation
+// ORDER - Cache-aligned order with intrusive list pointers
 // ============================================================================
 
 struct Order {
@@ -17,70 +17,142 @@ struct Order {
     Quantity original_qty;
     Quantity remaining_qty;
     
+    // Intrusive list pointers
+    Order* next;
+    Order* prev;
+    
     Order(OrderId id_, Timestamp ts, Side s, Price p, Quantity q)
         : id(id_), timestamp(ts), side(s), price(p), 
-          original_qty(q), remaining_qty(q) {}
+          original_qty(q), remaining_qty(q), next(nullptr), prev(nullptr) {}
     
     bool is_filled() const { 
         return remaining_qty.get() == 0; 
     }
     
-    // Invariant: remaining_qty <= original_qty
     bool check_invariants() const {
         return remaining_qty.get() <= original_qty.get();
     }
+} __attribute__((aligned(64)));
+
+// ============================================================================
+// OBJECT POOL - Pre-allocated memory pool for orders
+// ============================================================================
+
+template<typename T>
+class ObjectPool {
+private:
+    std::vector<T> pool_;
+    std::vector<T*> free_list_;
+    size_t capacity_;
+
+public:
+    explicit ObjectPool(size_t capacity) : capacity_(capacity) {
+        pool_.reserve(capacity);
+        free_list_.reserve(capacity);
+
+        // Pre-allocate all objects
+        for (size_t i = 0; i < capacity; ++i) {
+            pool_.emplace_back(OrderId(0), Timestamp(0), Side::BUY, 
+                              Price(0), Quantity(0));
+            free_list_.push_back(&pool_[i]);
+        }
+    }
+
+    T* allocate() {
+        if (free_list_.empty()) {
+            return nullptr;  // Pool exhausted
+        }
+        T* obj = free_list_.back();
+        free_list_.pop_back();
+        return obj;
+    }
+    
+    void deallocate(T* obj) {
+        if (obj) {
+            free_list_.push_back(obj);
+        }
+    }
+    
+    size_t available() const {
+        return free_list_.size();
+    }
+
 };
 
 // ============================================================================
-// LIMIT LEVEL - Price level with FIFO queue
+// LIMIT LEVEL - Intrusive doubly-linked list
 // ============================================================================
 
 struct LimitLevel {
     Price price;
-    std::queue<std::shared_ptr<Order>> orders;
+    Order* head;
+    Order* tail;
     Quantity total_volume;
+    size_t order_count;
     
     explicit LimitLevel(Price p) 
-        : price(p), total_volume(Quantity(0)) {}
+        : price(p), head(nullptr), tail(nullptr), 
+          total_volume(Quantity(0)), order_count(0) {}
     
-    void add_order(std::shared_ptr<Order> order) {
-        orders.push(order);
+    void add_order(Order* order) {
+        order->next = nullptr;
+        order->prev = tail;
+        
+        if (tail) {
+            tail->next = order;
+        } else {
+            head = order;
+        }
+        
+        tail = order;
         total_volume = Quantity(total_volume.get() + order->remaining_qty.get());
+        ++order_count;
     }
     
-    std::shared_ptr<Order> front() { 
-        return orders.front(); 
+    Order* front() { 
+        return head; 
     }
     
-    void pop() { 
-        orders.pop(); 
+    void pop() {
+        if (!head) return;
+        
+        head = head->next;
+        
+        if (head) {
+            head->prev = nullptr;
+        } else {
+            tail = nullptr;
+        }
+        
+        --order_count;
     }
     
     bool empty() const { 
-        return orders.empty(); 
+        return head == nullptr; 
     }
     
     size_t size() const { 
-        return orders.size(); 
+        return order_count; 
     }
     
-    // Invariant: total_volume equals sum of all order remaining quantities
     bool check_invariants() const {
-        uint64_t computed_volume = 0;
-        std::queue<std::shared_ptr<Order>> temp = orders;
-        
-        while (!temp.empty()) {
-            auto order = temp.front();
-            temp.pop();
-            
-            if (!order->check_invariants()) {
-                return false;
-            }
-            
-            computed_volume += order->remaining_qty.get();
+        if (empty()) {
+            return total_volume.get() == 0 && order_count == 0;
         }
         
-        return computed_volume == total_volume.get();
+        uint64_t computed_volume = 0;
+        size_t computed_count = 0;
+        Order* curr = head;
+        
+        while (curr) {
+            if (!curr->check_invariants()) return false;
+            computed_volume += curr->remaining_qty.get();
+            ++computed_count;
+            curr = curr->next;
+        }
+        
+        return computed_volume == total_volume.get() && 
+               computed_count == order_count;
     }
 };
 

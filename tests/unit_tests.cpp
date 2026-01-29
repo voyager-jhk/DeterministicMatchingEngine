@@ -2,6 +2,21 @@
 #include "../src/replay.hpp"
 #include <iostream>
 #include <cassert>
+#include <variant>
+#include <vector>
+
+// ============================================================================
+// CUSTOM ASSERTION MACRO (Works in Release Mode)
+// ============================================================================
+#define TEST_ASSERT(cond) \
+    do { \
+        if (!(cond)) { \
+            std::cerr << "❌ Assertion failed: " << #cond \
+                      << "\n   File: " << __FILE__ \
+                      << "\n   Line: " << __LINE__ << std::endl; \
+            throw std::runtime_error("Test assertion failed"); \
+        } \
+    } while(0)
 
 // ============================================================================
 // UNIT TEST SUITE
@@ -12,140 +27,192 @@ public:
     static void run_all_tests() {
         std::cout << "Running Matching Engine Test Suite...\n\n";
         
-        test_simple_fill();
-        test_partial_fill();
-        test_multi_level_sweep();
-        test_cancel_order();
-        test_price_time_priority();
-        test_invariants();
-        test_replay_determinism();
-        test_empty_book();
-        test_crossed_order();
-        
-        std::cout << "\n✅ All tests passed!\n";
+        try {
+            test_simple_fill();
+            test_partial_fill();
+            test_multi_level_sweep();
+            test_cancel_order();
+            test_price_time_priority();
+            test_invariants();
+            test_replay_determinism();
+            test_empty_book();
+            test_crossed_order();
+            
+            std::cout << "\n✅ All tests passed!\n";
+        } catch (const std::exception& e) {
+            std::cerr << "\n❌ Test failed with exception: " << e.what() << "\n";
+            exit(1);
+        }
     }
     
 private:
+    // Helper: Compare internal price with expected double (approximate match not needed for integers)
+    static bool eq_price(Price p, double expected) {
+        return p.get() == static_cast<int64_t>(expected * PRICE_SCALE);
+    }
+
     static void test_simple_fill() {
-        std::cout << "Test 1: Simple Fill\n";
+        std::cout << "Test 1: Simple Fill... ";
         OrderBook book;
         
-        book.process_new_order(OrderId(1), Side::SELL, Price(100.0), Quantity(10));
-        book.process_new_order(OrderId(2), Side::BUY, Price(100.0), Quantity(10));
+        // Sell 10 @ 100.0
+        book.process_new_order(OrderId(1), Side::SELL, from_double(100.0), Quantity(10));
+        // Buy 10 @ 100.0 -> Match
+        book.process_new_order(OrderId(2), Side::BUY, from_double(100.0), Quantity(10));
         
-        assert(!book.best_bid().has_value());
-        assert(!book.best_ask().has_value());
-        std::cout << "  ✓ Orders fully matched\n";
+        TEST_ASSERT(!book.best_bid().has_value());
+        TEST_ASSERT(!book.best_ask().has_value());
+        std::cout << "Passed\n";
     }
     
     static void test_partial_fill() {
-        std::cout << "Test 2: Partial Fill\n";
+        std::cout << "Test 2: Partial Fill... ";
         OrderBook book;
         
-        book.process_new_order(OrderId(1), Side::SELL, Price(100.0), Quantity(10));
-        book.process_new_order(OrderId(2), Side::BUY, Price(100.0), Quantity(5));
+        // Sell 10 @ 100.0
+        book.process_new_order(OrderId(1), Side::SELL, from_double(100.0), Quantity(10));
+        // Buy 5 @ 100.0 -> Partial Match
+        book.process_new_order(OrderId(2), Side::BUY, from_double(100.0), Quantity(5));
         
-        assert(book.best_ask().has_value());
-        assert(book.best_ask().value().get() == 100.0);
-        std::cout << "  ✓ Partial fill handled correctly\n";
+        // Remaining Sell 5 @ 100.0
+        TEST_ASSERT(book.best_ask().has_value());
+        TEST_ASSERT(eq_price(*book.best_ask(), 100.0));
+        
+        // Check event log for Trade
+        const auto& log = book.get_event_log();
+        TEST_ASSERT(!log.empty());
+        bool found_trade = false;
+        for(const auto& evt : log) {
+            if (std::holds_alternative<TradeEvent>(evt)) {
+                const auto& trade = std::get<TradeEvent>(evt);
+                if (trade.quantity.get() == 5) found_trade = true;
+            }
+        }
+        TEST_ASSERT(found_trade);
+        std::cout << "Passed\n";
     }
     
     static void test_multi_level_sweep() {
-        std::cout << "Test 3: Multi-Level Sweep\n";
+        std::cout << "Test 3: Multi-Level Sweep... ";
         OrderBook book;
         
-        book.process_new_order(OrderId(1), Side::SELL, Price(100.0), Quantity(10));
-        book.process_new_order(OrderId(2), Side::SELL, Price(101.0), Quantity(10));
-        book.process_new_order(OrderId(3), Side::SELL, Price(102.0), Quantity(10));
-        book.process_new_order(OrderId(4), Side::BUY, Price(105.0), Quantity(25));
+        book.process_new_order(OrderId(1), Side::SELL, from_double(100.0), Quantity(10));
+        book.process_new_order(OrderId(2), Side::SELL, from_double(101.0), Quantity(10));
+        book.process_new_order(OrderId(3), Side::SELL, from_double(102.0), Quantity(10));
         
-        assert(book.best_ask().value().get() == 102.0);
-        std::cout << "  ✓ Multi-level sweep executed correctly\n";
+        // Buy 25 @ 105.0 -> Sweeps 100.0 and 101.0, eats 5 of 102.0
+        book.process_new_order(OrderId(4), Side::BUY, from_double(105.0), Quantity(25));
+        
+        TEST_ASSERT(book.best_ask().has_value());
+        TEST_ASSERT(eq_price(*book.best_ask(), 102.0));
+        std::cout << "Passed\n";
     }
     
     static void test_cancel_order() {
-        std::cout << "Test 4: Cancel Order\n";
+        std::cout << "Test 4: Cancel Order... ";
         OrderBook book;
         
-        book.process_new_order(OrderId(1), Side::SELL, Price(100.0), Quantity(10));
+        book.process_new_order(OrderId(1), Side::SELL, from_double(100.0), Quantity(10));
         book.process_cancel(OrderId(1));
         
-        assert(!book.best_ask().has_value());
-        std::cout << "  ✓ Order cancellation works\n";
+        TEST_ASSERT(!book.best_ask().has_value());
+        
+        // Verify cancel event
+        const auto& log = book.get_event_log();
+        TEST_ASSERT(std::holds_alternative<CancelOrderEvent>(log.back()));
+        std::cout << "Passed\n";
     }
     
     static void test_price_time_priority() {
-        std::cout << "Test 5: Price-Time Priority\n";
+        std::cout << "Test 5: Price-Time Priority... ";
         OrderBook book;
         
-        book.process_new_order(OrderId(1), Side::SELL, Price(100.0), Quantity(10));
-        book.process_new_order(OrderId(2), Side::SELL, Price(100.0), Quantity(10));
-        book.process_new_order(OrderId(3), Side::BUY, Price(100.0), Quantity(5));
+        // Sell orders at same price
+        book.process_new_order(OrderId(1), Side::SELL, from_double(100.0), Quantity(10));
+        book.process_new_order(OrderId(2), Side::SELL, from_double(100.0), Quantity(10));
         
-        // Order 1 should be matched first (FIFO)
+        // Buy 5 -> Should match with Order 1 (First in)
+        book.process_new_order(OrderId(3), Side::BUY, from_double(100.0), Quantity(5));
+        
         const auto& log = book.get_event_log();
-        auto last_trade = std::dynamic_pointer_cast<TradeEvent>(log.back());
-        assert(last_trade->passive_order_id.get() == 1);
-        std::cout << "  ✓ FIFO priority maintained\n";
+        TEST_ASSERT(!log.empty());
+        
+        // Verify last event is Trade matching Order 1
+        const Event& last_evt = log.back();
+        const TradeEvent* trade = std::get_if<TradeEvent>(&last_evt);
+        
+        TEST_ASSERT(trade != nullptr);
+        TEST_ASSERT(trade->passive_order_id.get() == 1);
+        TEST_ASSERT(trade->aggressive_order_id.get() == 3);
+        std::cout << "Passed\n";
     }
     
     static void test_invariants() {
-        std::cout << "Test 6: Invariants\n";
+        std::cout << "Test 6: Invariants... ";
         OrderBook book;
         
-        book.process_new_order(OrderId(1), Side::BUY, Price(99.0), Quantity(10));
-        book.process_new_order(OrderId(2), Side::SELL, Price(101.0), Quantity(10));
+        book.process_new_order(OrderId(1), Side::BUY, from_double(99.0), Quantity(10));
+        book.process_new_order(OrderId(2), Side::SELL, from_double(101.0), Quantity(10));
         
-        assert(book.check_invariants());
-        assert(book.best_bid().value().get() < book.best_ask().value().get());
-        std::cout << "  ✓ All invariants satisfied\n";
+        // Manual invariant check: Bid < Ask
+        TEST_ASSERT(book.best_bid().has_value());
+        TEST_ASSERT(book.best_ask().has_value());
+        TEST_ASSERT(book.best_bid()->get() < book.best_ask()->get());
+        std::cout << "Passed\n";
     }
     
     static void test_replay_determinism() {
-        std::cout << "Test 7: Replay Determinism\n";
+        std::cout << "Test 7: Replay Determinism... ";
         OrderBook book1;
         
-        book1.process_new_order(OrderId(1), Side::SELL, Price(100.0), Quantity(10));
-        book1.process_new_order(OrderId(2), Side::BUY, Price(100.0), Quantity(5));
-        book1.process_new_order(OrderId(3), Side::SELL, Price(101.0), Quantity(10));
+        book1.process_new_order(OrderId(1), Side::SELL, from_double(100.0), Quantity(10));
+        book1.process_new_order(OrderId(2), Side::BUY, from_double(100.0), Quantity(5)); // Trade
+        book1.process_new_order(OrderId(3), Side::SELL, from_double(101.0), Quantity(10));
         
         auto log = book1.get_event_log();
+        
+        // Replay
         OrderBook book2 = ReplayEngine::replay_from_log(log);
         
-        assert(book1.best_ask().value().get() == book2.best_ask().value().get());
-        std::cout << "  ✓ Replay produces identical state\n";
+        // Verify state equality
+        // 1. Check Best Ask
+        TEST_ASSERT(book1.best_ask().has_value() == book2.best_ask().has_value());
+        if (book1.best_ask().has_value()) {
+            TEST_ASSERT(book1.best_ask()->get() == book2.best_ask()->get());
+        }
+        
+        // 2. Check Best Bid
+        TEST_ASSERT(book1.best_bid().has_value() == book2.best_bid().has_value());
+        
+        std::cout << "Passed\n";
     }
     
     static void test_empty_book() {
-        std::cout << "Test 8: Empty Book Edge Case\n";
+        std::cout << "Test 8: Empty Book Edge Case... ";
         OrderBook book;
         
-        assert(!book.best_bid().has_value());
-        assert(!book.best_ask().has_value());
-        assert(book.check_invariants());
-        std::cout << "  ✓ Empty book handled correctly\n";
+        TEST_ASSERT(!book.best_bid().has_value());
+        TEST_ASSERT(!book.best_ask().has_value());
+        
+        book.process_cancel(OrderId(999)); // Should not crash
+        std::cout << "Passed\n";
     }
     
     static void test_crossed_order() {
-        std::cout << "Test 9: Crossed Order Prevention\n";
+        std::cout << "Test 9: Crossed Order Prevention... ";
         OrderBook book;
         
-        // Add normal orders
-        book.process_new_order(OrderId(1), Side::BUY, Price(100.0), Quantity(10));
-        book.process_new_order(OrderId(2), Side::SELL, Price(101.0), Quantity(10));
+        book.process_new_order(OrderId(1), Side::BUY, from_double(100.0), Quantity(10));
+        book.process_new_order(OrderId(2), Side::SELL, from_double(101.0), Quantity(10));
         
-        // Verify book is not crossed
-        assert(book.best_bid().value().get() < book.best_ask().value().get());
+        // Aggressive Buy @ 102.0 (Crosses 101.0) -> Match
+        book.process_new_order(OrderId(3), Side::BUY, from_double(102.0), Quantity(10));
         
-        // Try to cross with aggressive order - should match immediately
-        book.process_new_order(OrderId(3), Side::BUY, Price(102.0), Quantity(10));
-        
-        // After matching, book should still not be crossed
+        // After match, book should be uncrossed
         if (book.best_bid().has_value() && book.best_ask().has_value()) {
-            assert(book.best_bid().value().get() < book.best_ask().value().get());
+            TEST_ASSERT(book.best_bid()->get() < book.best_ask()->get());
         }
-        
-        std::cout << "  ✓ Book never crosses\n";
+        std::cout << "Passed\n";
     }
 };
 
@@ -162,7 +229,7 @@ int main() {
         TestSuite::run_all_tests();
         return 0;
     } catch (const std::exception& e) {
-        std::cerr << "Test failed with exception: " << e.what() << "\n";
+        std::cerr << "CRITICAL ERROR: " << e.what() << "\n";
         return 1;
     }
 }

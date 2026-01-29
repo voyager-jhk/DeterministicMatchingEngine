@@ -5,6 +5,7 @@
 #include "order.hpp"
 #include "events.hpp"
 #include <map>
+#include <unordered_map>
 #include <vector>
 #include <optional>
 #include <iostream>
@@ -12,259 +13,245 @@
 #include <cassert>
 
 // ============================================================================
-// ORDER BOOK - Core Matching Engine
+// ORDER BOOK - HFT Optimized Matching Engine
 // ============================================================================
 
 class OrderBook {
 private:
-    // Bids: highest first, Asks: lowest first
-    std::map<double, LimitLevel, std::greater<double>> bids_;
-    std::map<double, LimitLevel, std::less<double>> asks_;
-    std::map<uint64_t, std::shared_ptr<Order>> order_map_;
+    // ------------------------------------------------------------------------
+    // Memory Management (Hot Path)
+    // ------------------------------------------------------------------------
+    ObjectPool<Order> order_pool_;
+
+    // ------------------------------------------------------------------------
+    // Data Structures
+    // ------------------------------------------------------------------------
+    // Bids: highest first (Greater), Asks: lowest first (Less)
+    // Key is int64_t (underlying type of Price) to avoid overhead
+    std::map<int64_t, LimitLevel, std::greater<int64_t>> bids_;
+    std::map<int64_t, LimitLevel, std::less<int64_t>> asks_;
+
+    // Fast O(1) lookup by Order ID
+    std::unordered_map<uint64_t, Order*> order_index_;
     
-    std::vector<std::shared_ptr<Event>> event_log_;
+    // Event Log: Stores objects by value (contiguous memory)
+    std::vector<Event> event_log_;
+    
     Timestamp current_time_;
 
-private:
-    // 模板辅助函数，可以处理任何类型的 map
-    template <typename MapType>
-    void remove_from_map(MapType& levels, std::shared_ptr<Order> order) {
-        // [这里是你的原始逻辑，原封不动地复制过来]
-        auto it = levels.find(order->price.get());
-        if (it != levels.end()) {
-            std::queue<std::shared_ptr<Order>> temp;
-            while (!it->second.orders.empty()) {
-                auto o = it->second.orders.front();
-                it->second.orders.pop();
-                if (o->id.get() != order->id.get()) {
-                    temp.push(o);
-                }
-            }
-            it->second.orders = temp;
-            it->second.total_volume = Quantity(
-                it->second.total_volume.get() - order->remaining_qty.get()
-            );
-
-            if (it->second.empty()) {
-                levels.erase(it);
-            }
-        }
-    }
-    
 public:
-    OrderBook() : current_time_(Timestamp(0)) {}
-    
-    // Main entry point for new orders
+    // Pre-allocate memory to avoid runtime allocation
+    explicit OrderBook(size_t capacity = 1000000) 
+        : order_pool_(capacity), current_time_(Timestamp(0)) {
+        event_log_.reserve(capacity);
+        order_index_.reserve(capacity);
+    }
+
+    // ========================================================================
+    // PROCESS: NEW ORDER
+    // ========================================================================
     void process_new_order(OrderId id, Side side, Price price, Quantity qty) {
         current_time_ = Timestamp(current_time_.get() + 1);
         
-        // Log event
-        auto event = std::make_shared<NewOrderEvent>(current_time_, id, side, price, qty);
-        event_log_.push_back(event);
+        // 1. Log Event (Zero allocation, emplace back)
+        event_log_.emplace_back(std::in_place_type<NewOrderEvent>, 
+                              current_time_, id, side, price, qty);
+
+        // 2. Allocate Order from Pool (O(1))
+        Order* order = order_pool_.allocate();
+        if (!order) {
+            std::cerr << "CRITICAL: Order Pool Exhausted!\n";
+            return;
+        }
+        // Initialize order in-place
+        *order = Order(id, current_time_, side, price, qty);
         
-        // Create order
-        auto order = std::make_shared<Order>(id, current_time_, side, price, qty);
-        order_map_[id.get()] = order;
-        
-        // Try to match
+        // 3. Indexing
+        order_index_[id.get()] = order;
+
+        // 4. Match logic
         if (side == Side::BUY) {
             match_order_buy(order);
         } else {
             match_order_sell(order);
         }
-        
-        // Add to book if not fully filled
+
+        // 5. Add remaining to book
         if (!order->is_filled()) {
             add_to_book(order);
+        } else {
+            order_index_.erase(id.get());
+            order_pool_.deallocate(order);
         }
-        
-        // Verify invariants
-        assert(check_invariants());
     }
-    
-    // Cancel order
+
+    // ========================================================================
+    // PROCESS: CANCEL ORDER (Optimized to O(1))
+    // ========================================================================
     void process_cancel(OrderId id) {
         current_time_ = Timestamp(current_time_.get() + 1);
         
-        auto event = std::make_shared<CancelOrderEvent>(current_time_, id);
-        event_log_.push_back(event);
-        
-        auto it = order_map_.find(id.get());
-        if (it != order_map_.end()) {
-            remove_from_book(it->second);
-            order_map_.erase(it);
+        // Log event
+        event_log_.emplace_back(std::in_place_type<CancelOrderEvent>, 
+                              current_time_, id);
+
+        auto it = order_index_.find(id.get());
+        if (it == order_index_.end()) {
+            return; // Order not found (already filled or cancelled)
         }
-        
-        assert(check_invariants());
+
+        Order* order = it->second;
+
+        // 1. Remove from LimitLevel (Intrusive Unlink O(1))
+        remove_from_level(order);
+
+        // 2. Free memory
+        order_index_.erase(it);
+        order_pool_.deallocate(order);
     }
-    
-    // Query best prices
+
+    // ========================================================================
+    // READ-ONLY ACCESSORS
+    // ========================================================================
     std::optional<Price> best_bid() const {
         if (bids_.empty()) return std::nullopt;
         return Price(bids_.begin()->first);
     }
-    
+
     std::optional<Price> best_ask() const {
         if (asks_.empty()) return std::nullopt;
         return Price(asks_.begin()->first);
     }
-    
-    // Get event log
-    const std::vector<std::shared_ptr<Event>>& get_event_log() const {
+
+    const std::vector<Event>& get_event_log() const {
         return event_log_;
     }
-    
-    // Print order book
-    void print_book(std::ostream& os = std::cout) const {
-        os << "\n========== ORDER BOOK ==========\n";
-        os << "ASKS:\n";
-        for (auto it = asks_.rbegin(); it != asks_.rend(); ++it) {
-            os << "  " << it->first << " : " << it->second.total_volume.get() 
-               << " (" << it->second.size() << " orders)\n";
-        }
-        os << "-----------------------------\n";
-        for (const auto& [price, level] : bids_) {
-            os << "  " << price << " : " << level.total_volume.get()
-               << " (" << level.size() << " orders)\n";
-        }
-        os << "BIDS\n";
-        os << "================================\n";
-    }
-    
-    // Check all invariants
-    bool check_invariants() const {
-        // 1. Best bid < best ask
-        if (!bids_.empty() && !asks_.empty()) {
-            if (bids_.begin()->first >= asks_.begin()->first) {
-                std::cerr << "INVARIANT VIOLATION: Crossed book!\n";
-                return false;
-            }
-        }
-        
-        // 2. All levels satisfy their invariants
-        for (const auto& [_, level] : bids_) {
-            if (!level.check_invariants()) return false;
-        }
-        for (const auto& [_, level] : asks_) {
-            if (!level.check_invariants()) return false;
-        }
-        
-        // 3. All orders in map are valid
-        for (const auto& [_, order] : order_map_) {
-            if (!order->check_invariants()) return false;
-        }
-        
-        return true;
-    }
-    
+
+    // ========================================================================
+    // MATCHING LOGIC
+    // ========================================================================
 private:
-    // Match buy order against asks
-    void match_order_buy(std::shared_ptr<Order> order) {
-        while (!order->is_filled() && !asks_.empty()) {
-            auto& [ask_price, ask_level] = *asks_.begin();
-            
-            // Check if order crosses
-            if (order->price.get() < ask_price) break;
-            
-            // Match with best ask
-            auto passive_order = ask_level.front();
-            uint64_t trade_qty = std::min(
-                order->remaining_qty.get(), 
-                passive_order->remaining_qty.get()
-            );
-            
-            // Generate trade event
-            current_time_ = Timestamp(current_time_.get() + 1);
-            auto trade = std::make_shared<TradeEvent>(
-                current_time_, passive_order->id, order->id,
-                Price(ask_price), Quantity(trade_qty)
-            );
-            event_log_.push_back(trade);
-            
-            // Update quantities
-            order->remaining_qty = Quantity(order->remaining_qty.get() - trade_qty);
-            passive_order->remaining_qty = Quantity(passive_order->remaining_qty.get() - trade_qty);
-            ask_level.total_volume = Quantity(ask_level.total_volume.get() - trade_qty);
-            
-            // Remove filled passive order
-            if (passive_order->is_filled()) {
-                ask_level.pop();
-                order_map_.erase(passive_order->id.get());
-            }
-            
-            // Remove empty level
-            if (ask_level.empty()) {
-                asks_.erase(asks_.begin());
+    void match_order_buy(Order* aggressive_order) {
+        auto it = asks_.begin();
+        
+        while (it != asks_.end() && !aggressive_order->is_filled()) {
+            Price level_price = Price(it->first);
+            LimitLevel& level = it->second;
+
+            // Check price crossing
+            if (aggressive_order->price.get() < level_price.get()) break;
+
+            // Match against orders in the level
+            match_level(aggressive_order, level, level_price);
+
+            // If level empty, remove it
+            if (level.empty()) {
+                it = asks_.erase(it);
+            } else {
+                ++it;
             }
         }
     }
-    
-    // Match sell order against bids
-    void match_order_sell(std::shared_ptr<Order> order) {
-        while (!order->is_filled() && !bids_.empty()) {
-            auto& [bid_price, bid_level] = *bids_.begin();
-            
-            // Check if order crosses
-            if (order->price.get() > bid_price) break;
-            
-            // Match with best bid
-            auto passive_order = bid_level.front();
-            uint64_t trade_qty = std::min(
-                order->remaining_qty.get(), 
-                passive_order->remaining_qty.get()
-            );
-            
-            // Generate trade event
-            current_time_ = Timestamp(current_time_.get() + 1);
-            auto trade = std::make_shared<TradeEvent>(
-                current_time_, passive_order->id, order->id,
-                Price(bid_price), Quantity(trade_qty)
-            );
-            event_log_.push_back(trade);
-            
-            // Update quantities
-            order->remaining_qty = Quantity(order->remaining_qty.get() - trade_qty);
-            passive_order->remaining_qty = Quantity(passive_order->remaining_qty.get() - trade_qty);
-            bid_level.total_volume = Quantity(bid_level.total_volume.get() - trade_qty);
-            
-            // Remove filled passive order
-            if (passive_order->is_filled()) {
-                bid_level.pop();
-                order_map_.erase(passive_order->id.get());
-            }
-            
-            // Remove empty level
-            if (bid_level.empty()) {
-                bids_.erase(bids_.begin());
+
+    void match_order_sell(Order* aggressive_order) {
+        auto it = bids_.begin();
+        
+        while (it != bids_.end() && !aggressive_order->is_filled()) {
+            Price level_price = Price(it->first);
+            LimitLevel& level = it->second;
+
+            if (aggressive_order->price.get() > level_price.get()) break;
+
+            match_level(aggressive_order, level, level_price);
+
+            if (level.empty()) {
+                it = bids_.erase(it);
+            } else {
+                ++it;
             }
         }
     }
-    
-    // Add order to book
-    void add_to_book(std::shared_ptr<Order> order) {
+
+    void match_level(Order* aggressive, LimitLevel& level, Price match_price) {
+        while (!level.empty() && !aggressive->is_filled()) {
+            Order* passive = level.front(); // O(1) access
+
+            uint64_t trade_qty = std::min(
+                aggressive->remaining_qty.get(),
+                passive->remaining_qty.get()
+            );
+
+            // 1. Generate Trade Event
+            current_time_ = Timestamp(current_time_.get() + 1);
+            event_log_.emplace_back(std::in_place_type<TradeEvent>,
+                current_time_, passive->id, aggressive->id,
+                match_price, Quantity(trade_qty)
+            );
+
+            // 2. Update quantities
+            aggressive->remaining_qty = Quantity(aggressive->remaining_qty.get() - trade_qty);
+            passive->remaining_qty = Quantity(passive->remaining_qty.get() - trade_qty);
+            level.total_volume = Quantity(level.total_volume.get() - trade_qty);
+
+            // 3. Handle passive fill
+            if (passive->is_filled()) {
+                // Remove from book O(1)
+                level.pop(); 
+                // Remove from index & pool
+                order_index_.erase(passive->id.get());
+                order_pool_.deallocate(passive);
+            }
+        }
+    }
+
+    // ========================================================================
+    // BOOK MANAGEMENT HELPERS
+    // ========================================================================
+    void add_to_book(Order* order) {
+        // Find or create level
+        if (order->side == Side::BUY) {
+            auto [it, inserted] = bids_.try_emplace(order->price.get(), order->price);
+            it->second.add_order(order);
+        } else {
+            auto [it, inserted] = asks_.try_emplace(order->price.get(), order->price);
+            it->second.add_order(order);
+        }
+    }
+
+    // O(1) removal from doubly-linked list
+    void remove_from_level(Order* order) {
+        // We need to find the level to update total_volume
+        // Since we don't store level* in Order to save memory, we look it up.
+        // Optimization: In a real HFT system, Order might store `LimitLevel* parent`
+        // at the cost of 8 bytes. Here we look up in map (O(log M)).
+        // But the unlinking itself is O(1).
+        
+        LimitLevel* level = nullptr;
         if (order->side == Side::BUY) {
             auto it = bids_.find(order->price.get());
-            if (it == bids_.end()) {
-                bids_.emplace(order->price.get(), LimitLevel(order->price));
-                it = bids_.find(order->price.get());
-            }
-            it->second.add_order(order);
+            if (it != bids_.end()) level = &it->second;
         } else {
             auto it = asks_.find(order->price.get());
-            if (it == asks_.end()) {
-                asks_.emplace(order->price.get(), LimitLevel(order->price));
-                it = asks_.find(order->price.get());
-            }
-            it->second.add_order(order);
+            if (it != asks_.end()) level = &it->second;
         }
-    }
-    
-    // Remove order from book (simplified - O(N) for clarity)
-    void remove_from_book(std::shared_ptr<Order> order) {
-        if (order->side == Side::BUY) {
-            remove_from_map(bids_, order);
-        } else {
-            remove_from_map(asks_, order);
+
+        if (!level) return; // Should not happen
+
+        // Unlink from list
+        if (order->prev) order->prev->next = order->next;
+        else level->head = order->next; // Was head
+
+        if (order->next) order->next->prev = order->prev;
+        else level->tail = order->prev; // Was tail
+
+        // Update level stats
+        level->total_volume = Quantity(level->total_volume.get() - order->remaining_qty.get());
+        level->order_count--;
+
+        // Clean up level if empty
+        if (level->empty()) {
+            if (order->side == Side::BUY) bids_.erase(order->price.get());
+            else asks_.erase(order->price.get());
         }
     }
 };

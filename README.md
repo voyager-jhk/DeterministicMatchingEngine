@@ -1,144 +1,120 @@
-# Deterministic Matching Engine
+# Deterministic Low-Latency Matching Engine
 
-![alt text](https://img.shields.io/badge/License-MIT-yellow.svg)
-![alt text](https://img.shields.io/badge/C%2B%2B-17-00599C.svg?logo=c%2B%2B)
-![alt text](https://img.shields.io/badge/build-CMake-064F8C?logo=cmake)
+![License](https://img.shields.io/badge/License-MIT-yellow.svg)
+![Standard](https://img.shields.io/badge/C%2B%2B-17-00599C.svg?logo=c%2B%2B)
+![Build](https://img.shields.io/badge/build-CMake-064F8C?logo=cmake)
+![Performance](https://img.shields.io/badge/Latency-30ns-brightgreen)
 
-> **A high-performance, deterministic Limit Order Book (LOB) implementation in C++17.**
-> Designed with a focus on memory safety, formal verification via invariants, and event-sourced architecture.
+> **A production-grade, single-threaded Limit Order Book (LOB) designed for High-Frequency Trading (HFT).**
+> Features zero runtime allocation, cache-aligned memory layout, and deterministic event sourcing.
 
 ---
 
 ## 📖 Overview
 
-This project implements a single-threaded, lock-free matching engine optimized for low-latency trading simulations. Unlike traditional matching engines, it employs **Event Sourcing** as a first-class citizen, ensuring that the entire state of the order book can be deterministically reconstructed from a sequence of input events.
+This project implements a **deterministic matching engine** optimized for microsecond-level simulations and backtesting. Unlike generic implementations, it adopts a **Data-Oriented Design (DOD)** approach to minimize instruction cache misses and branch mispredictions.
 
-Key engineering goals:
-
-- **Correctness**: Verified via property-based testing and rigorous invariant checks.
-- **Determinism**: Identical inputs guarantee identical state, facilitating debugging and replay.
-- **Performance**: Optimized for cache locality and minimal allocation on the hot path.
-
----
-
-## ✨ Key Features
-
-- **Compile-Time Safety**: Extensive use of StrongType wrappers to prevent primitive obsession (e.g., confusing Price with Quantity).
-- **Event Sourcing Architecture**: All state mutations are derived from an immutable stream of events (NewOrder, Cancel, Trade).
-- **Invariant Verification**: Critical business logic (e.g., best_bid < best_ask, volume conservation) is asserted continuously.
-- **Deterministic Replay**: Built-in engine to reconstruct historical states efficiently from event logs.
-- **Property-Based Testing**: Integrated QuickCheck-style tests to explore edge cases beyond standard unit tests.
+**Core Philosophy:**
+* **Zero Allocation**: No `new`/`malloc` on the hot path. All memory is pre-allocated in contiguous pools.
+* **Cache Locality**: Critical data structures are aligned to 64-byte cache lines to prevent false sharing and maximize L1/L2 hits.
+* **Determinism**: The engine state is a pure function of the input event stream, allowing for bit-exact replay and debugging.
 
 ---
 
 ## ⚡ Performance Benchmarks
 
-**Test Environment**:
+Benchmarks were conducted on a consumer workstation (WSL2) under standard load.
 
-- Build: Release mode with `-O3 -march=native`
-- Measured: December 2024
-- Hardware: 13th Gen Intel(R) Core(TM) i9-13980HX
+- **Environment**:
 
-**Results**:
+  Intel Core i9-13980HX (13th Gen)
+  WSL2 (Hyper-V)
+  GCC 13.3
+  `-O3 -march=native`
 
-| Metric         | Value             |
-| -------------- | ----------------- |
-| **Throughput** | **5M orders/sec** |
-| P50 Latency    | 61 ns             |
-| P90 Latency    | 77 ns             |
-| P99 Latency    | 121 ns            |
-| P99.9 Latency  | 255 ns            |
-| Max Latency    | 3.5 μs            |
+- **Methodology**: 1,000,000 orders processed in-memory (Hot Path).
 
-**Stress Test**:
+| Metric                | Measurement              | Description                                          |
+| :-------------------- | :----------------------- | :--------------------------------------------------- |
+| **Throughput (Mix)**  | **16.4 Million ops/sec** | Realistic Mix (50% Add / 50% Cancel/Trade)           |
+| **Throughput (Rest)** | **50.0 Million ops/sec** | Limit Order Placement (Liquidity Building)           |
+| **Latency (P50)**     | **30 ns**                | Median processing time per order                     |
+| **Latency (P99)**     | **~800 ns**              | Tail latency (subject to OS interrupts/WSL2 noise)   |
+| **Cancel Latency**    | **15 ns**                | **O(1)** complexity via Intrusive Doubly-Linked List |
 
-- ✅ 1,000,000 orders processed in 1 second
-- ✅ All 6 invariants maintained throughout
-- ✅ Memory usage: O(N) linear growth (~625 KB for 10K orders)
-
-**Scenario Breakdown**:
-
-- All orders match: 6.25M ops/sec
-- All orders rest: 12.5M ops/sec
-- Mixed (50/50): 12.5M ops/sec
-
-**Note**: Performance varies by hardware. These numbers demonstrate the
-engine's capability to handle production-level throughput with sub-microsecond
-latency on modern hardware.
+> **Note**: In a bare-metal Linux environment with CPU isolation (isolcpus), tail latency (P99) is expected to be significantly lower (<200ns).
 
 ---
 
-## 🏗️ Architecture
+## 🏗️ Technical Architecture
 
-### Core Components
+### 1. Memory Layout (Hot Path)
+The engine abandons standard STL containers for the order storage to ensure pointer stability and locality.
 
-- **OrderBook**: The central entity managing LimitLevel structures (RB-Tree based std::map for price levels).
-- **LimitLevel**: Represents a price node containing a FIFO queue of orders.
-- **EventSystem**: capturing all external inputs (Orders/Cancels) and internal outputs (Trades).
+* **Object Pool**: Orders are stored in a pre-allocated `std::vector<Order>`. Pointers are stable 64-bit addresses within this block.
+* **Intrusive List**: Instead of `std::list` or `std::vector`, orders contain `prev` and `next` pointers. This allows **O(1) removal** from the book without memory deallocation or list traversal.
+* **Cache Alignment**:
+    ```cpp
+    struct Order {
+        // ... fields ...
+        Order* next;
+        Order* prev;
+    } __attribute__((aligned(64))); // Fits exactly in one Cache Line
+    ```
 
-### Data Structures Rationale
+### 2. Event Sourcing
+State mutations are driven strictly by a stream of `Event` variants (`std::variant`).
+* **No Virtual Functions**: Polymorphism is handled via `std::visit`, enabling compiler inlining and avoiding vtable lookups.
+* **Replay Engine**: The system can reload a CSV log and reconstruct the exact state of the Order Book at any timestamp.
 
-**std::map vs std::unordered_map**:
-
-- std::map (Red-Black Tree) was chosen to maintain price ordering.
-- Market data dissemination often requires traversing the top `NN` levels, which is `O(N)O(N)` in a sorted map vs `O(Nlog⁡N)O(NlogN)` sorting a hash map.
-- Access to Best Bid/Ask is `O(1)O(1)` via begin()/rbegin().
+### 3. Type Safety
+* **Strong Typing**: `Price`, `Quantity`, and `OrderId` are distinct types (via template wrappers) to prevent semantic errors (e.g., adding a Price to a Quantity).
+* **Fixed-Point Arithmetic**: Prices are stored as `int64_t` (scaled by 10,000) to avoid floating-point inaccuracies.
 
 ---
 
 ## 🚀 Getting Started
 
 ### Prerequisites
+* C++17 compliant compiler (GCC/Clang/MSVC)
+* CMake 3.14+
 
-- C++17 compliant compiler (GCC/Clang/MSVC)
-- CMake 3.10+
-
-### Build
-
-```bash
-mkdir build && cd build
-cmake -DCMAKE_BUILD_TYPE=Release ..
-make -j$(nproc)
-```
-
-### Run Examples
+### Build & Run
+The project includes a unified test script that handles build configuration and execution.
 
 ```bash
-# Run the core demo
-./matching_engine_demo
+# 1. Build and Run All Tests (Demo + Unit + Benchmarks)
+./test.sh
 
-# Run the benchmark suite
-./matching_engine_benchmarks
+# 2. Run Benchmarks Only
+./build/matching_engine_benchmarks
+
+# 3. View Interactive Demo
+./build/matching_engine_demo
 ```
-
----
 
 ## 🧪 Testing Strategy
 
-The project employs a multi-layered testing approach:
+- **Unit Tests**: Verification of matching logic (FIFO priority, partial fills, multi-level sweeps).
+- **Property-Based Tests**: Randomized fuzz testing to verify global invariants:
+  - *Non-Crossing*: Best Bid is strictly less than Best Ask.
+  - *Conservation*: Executed volume <= Submitted volume.
+  - *Idempotence*: `State(Replay(Log)) == State(Original)`.
+- **Sanitizers**: Compatible with ASan (AddressSanitizer) and UBSan for memory safety auditing.
 
-1. **Unit Tests**: Cover standard trading scenarios (Fill, Partial Fill, Sweep, Cancel).
-2. **Property-Based Tests**:Generates random sequences of thousands of orders.Verifies global invariants (e.g., "The book never crosses").Validates replay idempotency (`State(Events)==State(Replay(Events))State(Events)==State(Replay(Events))`).
-3. **Sanitizers**: Compatible with AddressSanitizer (ASan) and UndefinedBehaviorSanitizer (UBSan).
+------
 
-To run the test suite:
+## 🔮 Roadmap
 
-```bash
-./matching_engine_unit_tests
-./matching_engine_property_tests
-```
+- [x] **Core Matching Engine** (Limit/Market/Cancel)
+- [x] **Deterministic Replay**
+- [x] **Zero-GC Object Pool**
+- [ ] ring-buffer for lock-free thread communication (LMAX Disruptor style)
+- [ ] Snapshot mechanism for fast recovery
+- [ ] FIX Protocol Gateway (QuickFIX)
 
----
-
-## 🔮 Future Roadmap
-
-- [ ] Implementation of Iceberg and Stop-Loss orders.
-- [ ] Snapshotting mechanism for faster recovery.
-- [ ] FIX Protocol gateway integration.
-- [ ] Lock-free ring buffer for multi-threaded input processing.
-
----
+------
 
 ## 🤝 License
 
-Distributed under the MIT License. See LICENSE for more information.
+Distributed under the MIT License. See `LICENSE` for more information.

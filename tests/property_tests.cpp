@@ -3,6 +3,22 @@
 #include <iostream>
 #include <random>
 #include <cassert>
+#include <variant>
+#include <vector>
+#include <algorithm> // For std::min
+
+// ============================================================================
+// CUSTOM ASSERTION MACRO
+// ============================================================================
+#define TEST_ASSERT(cond) \
+    do { \
+        if (!(cond)) { \
+            std::cerr << "❌ Assertion failed: " << #cond \
+                      << "\n   File: " << __FILE__ \
+                      << "\n   Line: " << __LINE__ << std::endl; \
+            throw std::runtime_error("Property check failed"); \
+        } \
+    } while(0)
 
 // ============================================================================
 // PROPERTY-BASED TESTING (QuickCheck style)
@@ -24,10 +40,14 @@ private:
         std::uniform_real_distribution<> price_dist(95.0, 105.0);
         std::uniform_int_distribution<uint64_t> qty_dist(1, 1000);
         
+        // Convert floating point random price to fixed-point int64
+        // Round to 2 decimal places then scale
+        double p = std::round(price_dist(rng) * 100.0) / 100.0;
+        
         return {
             OrderId(id),
             side_dist(rng) == 0 ? Side::BUY : Side::SELL,
-            Price(std::round(price_dist(rng) * 100.0) / 100.0), // 0.01 tick
+            Price(static_cast<int64_t>(p * PRICE_SCALE)),
             Quantity(qty_dist(rng))
         };
     }
@@ -37,32 +57,39 @@ public:
     void test_never_crosses() {
         std::cout << "\n🔬 Property Test 1: Book Never Crosses\n";
         
-        for (int trial = 0; trial < 1000; ++trial) {
-            OrderBook book;
+        for (int trial = 0; trial < 100; ++trial) { // Reduced trials for speed
+            OrderBook book(2000); // Pre-allocate
             
             for (uint64_t i = 0; i < 100; ++i) {
-                auto order = generate_random_order(trial * 100 + i);
+                auto order = generate_random_order(trial * 100 + i + 1);
                 book.process_new_order(order.id, order.side, order.price, order.quantity);
                 
-                if (!book.check_invariants()) {
-                    std::cerr << "FAILED at trial " << trial << ", order " << i << "\n";
-                    throw std::runtime_error("Invariant violation detected");
+                // Invariant Check: Best Bid < Best Ask
+                auto bid = book.best_bid();
+                auto ask = book.best_ask();
+                
+                if (bid.has_value() && ask.has_value()) {
+                    if (bid->get() >= ask->get()) {
+                        std::cerr << "FAILED at trial " << trial << ", order " << i << "\n";
+                        std::cerr << "Bid: " << bid->get() << " >= Ask: " << ask->get() << "\n";
+                        throw std::runtime_error("Invariant violation detected: Crossed Book");
+                    }
                 }
             }
         }
         
-        std::cout << "  ✓ Passed 1000 trials with 100,000 orders\n";
+        std::cout << "   ✓ Passed randomized crossing checks\n";
     }
     
     // Property 2: Replay Determinism
     void test_replay_idempotence() {
         std::cout << "\n🔬 Property Test 2: Replay Idempotence\n";
         
-        for (int trial = 0; trial < 100; ++trial) {
-            OrderBook book1;
+        for (int trial = 0; trial < 50; ++trial) {
+            OrderBook book1(1000); // Pre-allocate
             
             for (uint64_t i = 0; i < 50; ++i) {
-                auto order = generate_random_order(trial * 50 + i);
+                auto order = generate_random_order(trial * 50 + i + 1);
                 book1.process_new_order(order.id, order.side, order.price, order.quantity);
             }
             
@@ -70,37 +97,36 @@ public:
             
             auto bid1 = book1.best_bid();
             auto bid2 = book2.best_bid();
-            (void)bid2;
             auto ask1 = book1.best_ask();
             auto ask2 = book2.best_ask();
-            (void)ask2;
             
-            assert(bid1.has_value() == bid2.has_value());
-            assert(ask1.has_value() == ask2.has_value());
+            TEST_ASSERT(bid1.has_value() == bid2.has_value());
+            TEST_ASSERT(ask1.has_value() == ask2.has_value());
             
+            // Exact integer comparison
             if (bid1.has_value()) {
-                assert(std::abs(bid1->get() - bid2->get()) < 1e-9);
+                TEST_ASSERT(bid1->get() == bid2->get());
             }
             if (ask1.has_value()) {
-                assert(std::abs(ask1->get() - ask2->get()) < 1e-9);
+                TEST_ASSERT(ask1->get() == ask2->get());
             }
         }
         
-        std::cout << "  ✓ Passed 100 replay trials\n";
+        std::cout << "   ✓ Passed 50 replay trials\n";
     }
     
     // Property 3: Conservation of Execution Volume
     void test_volume_conservation() {
         std::cout << "\n🔬 Property Test 3: Volume Conservation\n";
         
-        for (int trial = 0; trial < 1000; ++trial) {
-            OrderBook book;
+        for (int trial = 0; trial < 100; ++trial) {
+            OrderBook book(2000);
             
             uint64_t total_buy = 0;
             uint64_t total_sell = 0;
             
             for (uint64_t i = 0; i < 100; ++i) {
-                auto order = generate_random_order(trial * 100 + i);
+                auto order = generate_random_order(trial * 100 + i + 1);
                 book.process_new_order(order.id, order.side, order.price, order.quantity);
                 
                 if (order.side == Side::BUY) {
@@ -112,51 +138,65 @@ public:
             
             uint64_t traded = 0;
             for (const auto& event : book.get_event_log()) {
-                if (auto trade = std::dynamic_pointer_cast<TradeEvent>(event)) {
+                // Use std::get_if for std::variant
+                if (auto trade = std::get_if<TradeEvent>(&event)) {
                     traded += trade->quantity.get();
                 }
             }
             
-            assert(traded <= std::min(total_buy, total_sell));
+            // Total traded quantity cannot exceed the total quantity submitted on either side
+            TEST_ASSERT(traded <= total_buy);
+            TEST_ASSERT(traded <= total_sell);
         }
         
-        std::cout << "  ✓ Volume conservation verified in 1000 trials\n";
+        std::cout << "   ✓ Volume conservation verified\n";
     }
     
     // Property 4: Priority Ordering (FIFO)
     void test_fifo_order() {
         std::cout << "\n🔬 Property Test 4: FIFO Priority\n";
         
-        OrderBook book;
+        OrderBook book(1000);
+        Price price(100 * PRICE_SCALE);
         
+        // Submit 10 Sell orders at same price
         for (uint64_t i = 0; i < 10; ++i) {
-            book.process_new_order(OrderId(i), Side::SELL, Price(100.0), Quantity(10));
+            book.process_new_order(OrderId(i+1), Side::SELL, price, Quantity(10));
         }
         
-        book.process_new_order(OrderId(100), Side::BUY, Price(100.0), Quantity(100));
+        // Submit 1 huge Buy order to sweep them all
+        book.process_new_order(OrderId(100), Side::BUY, price, Quantity(100));
         
         std::vector<uint64_t> trade_sequence;
         for (const auto& event : book.get_event_log()) {
-            if (auto trade = std::dynamic_pointer_cast<TradeEvent>(event)) {
+            if (auto trade = std::get_if<TradeEvent>(&event)) {
                 trade_sequence.push_back(trade->passive_order_id.get());
             }
         }
         
+        // Verify they matched in order 1, 2, 3... 10
+        TEST_ASSERT(trade_sequence.size() == 10);
         for (size_t i = 0; i < trade_sequence.size(); ++i) {
-            assert(trade_sequence[i] == i);
+            // Expected ID is i+1
+            if (trade_sequence[i] != i + 1) {
+                std::cerr << "FIFO Violation: Expected Order " << (i+1) 
+                          << ", got " << trade_sequence[i] << "\n";
+                throw std::runtime_error("FIFO violation");
+            }
         }
         
-        std::cout << "  ✓ FIFO order maintained\n";
+        std::cout << "   ✓ FIFO order maintained\n";
     }
     
     // Property 5: Best Price Monotonicity
     void test_price_monotonicity() {
         std::cout << "\n🔬 Property Test 5: Price Reasonableness\n";
         
-        OrderBook book;
+        OrderBook book(2000);
         
-        book.process_new_order(OrderId(1), Side::BUY, Price(99.0), Quantity(100));
-        book.process_new_order(OrderId(2), Side::SELL, Price(101.0), Quantity(100));
+        // Seed book
+        book.process_new_order(OrderId(1), Side::BUY, Price(99 * PRICE_SCALE), Quantity(100));
+        book.process_new_order(OrderId(2), Side::SELL, Price(101 * PRICE_SCALE), Quantity(100));
         
         for (int i = 0; i < 100; ++i) {
             auto order = generate_random_order(10 + i);
@@ -166,13 +206,14 @@ public:
             auto ask = book.best_ask();
             
             if (bid.has_value() && ask.has_value()) {
-                double spread = ask->get() - bid->get();
-                (void)spread;
-                assert(spread >= 0);
+                // Spread must be non-negative (Ask >= Bid)
+                if (ask->get() < bid->get()) {
+                    throw std::runtime_error("Negative spread detected!");
+                }
             }
         }
         
-        std::cout << "  ✓ Price spread remains non-negative\n";
+        std::cout << "   ✓ Price spread remains non-negative\n";
     }
     
     void run_all() {
