@@ -48,6 +48,18 @@ Benchmarks were conducted on a consumer workstation (WSL2) under standard load.
 
 ## 🏗️ Technical Architecture
 
+### System Architecture
+```mermaid
+graph TD
+    A[External Events] -->|std::variant| B(Event Sourcing Engine)
+    B -->|Process| C{OrderBook}
+    C -->|O/1 Map| D[LimitLevel]
+    D -->|Intrusive List| E[Order Pool]
+    E -.->|Aligned 64B| F[L1/L2 Cache]
+    C -->|Generate| G[Trade/Cancel Events]
+    G -->|Append| H[Immutable Event Log]
+```
+
 ### 1. Memory Layout (Hot Path)
 The engine abandons standard STL containers for the order storage to ensure pointer stability and locality.
 
